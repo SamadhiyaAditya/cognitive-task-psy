@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hidden Rule Reversal (HRR) task</title>
+<style>
+:root{--bg:#23272e;--panel:#2c313a;--ink:#ece9e2;--mute:#9aa1ab;--line:#3f4651;--accent:#6fc3b2;--bad:#e58b7b;--blue:#4a90e2;--orange:#f0a030}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:1.7rem;line-height:1.2;margin:0 0 .4rem}
+h2{font-size:1.2rem;margin:1.6rem 0 .5rem}
+p{margin:.5rem 0}.mute{color:var(--mute)}
+label{display:block;margin:.9rem 0 .25rem;font-weight:600}
+input,select{width:100%;padding:.6rem .7rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit}
+input[type=checkbox]{width:auto;margin-right:.5rem}
+.check{display:flex;align-items:flex-start;font-weight:400;margin-top:1rem}
+button{margin-top:1.4rem;margin-right:.5rem;padding:.7rem 1.2rem;border:0;border-radius:6px;background:var(--accent);color:#10231f;font:inherit;font-weight:700;cursor:pointer}
+button.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+kbd{padding:.05rem .4rem;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;background:var(--panel);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:.8rem 0;font-size:.95rem}
+th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}
+.err{color:var(--bad);min-height:1.4em;margin-top:.8rem}
+#stage{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;background:#23272e;cursor:none;z-index:10;text-align:center;padding:20px}
+#stage .fix{font:300 clamp(56px,9vw,90px)/1 system-ui,sans-serif}
+#stage .msg{font-size:1.15rem;max-width:560px;line-height:1.6}
+#stage .sub{font-size:1rem;color:var(--mute);margin-top:1.4rem}
+.cue{width:clamp(64px,10vw,96px);height:clamp(64px,10vw,96px);margin:1.2rem auto}
+.cue.blue{background:var(--blue);border-radius:50%}
+.cue.orange{background:var(--orange);border-radius:6px;transform:rotate(45deg) scale(.82)}
+.field{display:flex;align-items:center;justify-content:space-between;width:min(80vw,640px)}
+.slot{width:110px;height:110px;display:flex;align-items:center;justify-content:center}
+.tgt{display:block;width:64px;height:64px;background:#fff;border-radius:4px}
+.small{font:300 48px/1 system-ui,sans-serif}
+</style>
+</head>
+<body>
+<main id="screen"></main>
+<div id="stage" aria-live="polite"></div>
+
+<script>
+/* ===== Hidden Rule Reversal (HRR) task =====
+   Measures how people build a mental model of a cue-target rule and how fast they revise it when the rule silently reverses.
+   Trial: fixation 500 ms -> cue (blue circle | orange diamond) 500 ms -> ISI 200 ms (SOA 700 ms) -> target left/right
+          until response (max 1500 ms, keys F = left, J = right) -> ITI 600-1000 ms.
+   Phases: 1 Acquisition (rule A), 2 Reversal (rule flipped, unannounced), 3 Re-reversal (rule A again).
+   Between-subject: cue validity 85% (odd IDs) vs 70% (even IDs).  Mapping A/B counterbalanced across IDs.
+   Prediction probes (where do you expect the target? + confidence) every `probeEvery` trials. */
+
+const REAL = {fixMs:500, cueMs:500, isiMs:200, maxRT:1500, itiMin:600, itiMax:1000, phases:[60,60,40], probeEvery:20, practice:6};
+const DRY  = {...REAL, phases:[8,8,8], probeEvery:8, practice:2};
+const PHASE_NAMES = {1:'Acquisition', 2:'Reversal', 3:'Re-reversal'};
+const STORE = 'hrr_all_rows';
+
+const $ = s => document.querySelector(s);
+const scr = $('#screen'), stage = $('#stage');
+let P = {}, CFG = REAL, rows = [];
+
+const shuffle = a => { for (let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; };
+const mean = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : NaN;
+const fmt = (v,d=0) => Number.isFinite(v) ? v.toFixed(d) : '–';
+const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+const sleep = ms => new Promise(r => { const t0=performance.now(); const f=()=>performance.now()-t0>=ms-8 ? r() : requestAnimationFrame(f); f(); });
+const opp = s => s==='left' ? 'right' : 'left';
+
+function show(html) { stage.style.display='flex'; stage.innerHTML = html; }
+function hideStage() { stage.style.display='none'; stage.innerHTML=''; }
+function waitKey(keys, timeout) {
+  return new Promise(res => {
+    const t0 = performance.now(); let done = false;
+    const fin = v => { if (done) return; done = true; removeEventListener('keydown', h); res(v); };
+    const h = e => { if (e.repeat) return; const k = e.key.toLowerCase(); if (!keys.includes(k)) return; e.preventDefault(); fin({key:k, rt:performance.now()-t0}); };
+    addEventListener('keydown', h);
+    if (timeout) sleep(timeout).then(() => fin(null));
+  });
+}
+
+const FIX = '<div class="fix">+</div>';
+const cueHTML = c => `<div class="cue ${c}"></div>`;
+const targetHTML = side => `<div class="field"><div class="slot">${side==='left'?'<i class="tgt"></i>':''}</div><div class="small">+</div><div class="slot">${side==='right'?'<i class="tgt"></i>':''}</div></div>`;
+
+/* ---------- rule logic ---------- */
+const baseSide = cue => ((cue==='blue') === (P.mapping==='A')) ? 'left' : 'right';
+const ruleSide = (cue, ph) => ph===2 ? opp(baseSide(cue)) : baseSide(cue);
+
+function buildPhase(ph, N, v) {
+  const per = N/2, validPer = Math.round(v*per), t = [];
+  ['blue','orange'].forEach(c => { for (let i=0;i<per;i++) t.push({cue:c, valid:i<validPer, phase:ph}); });
+  return shuffle(t);
+}
+
+/* ---------- screens ---------- */
+function renderForm() {
+  hideStage();
+  scr.innerHTML = `
+    <h1>Hidden Rule Reversal task</h1>
+    <p class="mute">A short reaction and prediction task. It takes about 10 minutes. Use a laptop or desktop with a physical keyboard.</p>
+    <h2>Participant details</h2>
+    <label for="pid">Participant number</label><input id="pid" type="number" min="1" placeholder="1, 2, 3 …">
+    <label for="age">Age</label><input id="age" type="number" min="16" max="80">
+    <label for="gender">Gender</label>
+    <select id="gender"><option value="">Select</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Prefer not to say</option></select>
+    <label for="course">Course</label><input id="course" type="text" placeholder="e.g. BA Psychology">
+    <label for="email">Email</label><input id="email" type="email" placeholder="name@example.com">
+    <label class="check"><input id="consent" type="checkbox"><span>I agree to take part. My email is only used by the research team to contact me. Analysis uses my participant number instead.</span></label>
+    <label class="check"><input id="dry" type="checkbox"><span>Dry run (shortened to ${DRY.phases.reduce((a,b)=>a+b)} trials, not saved). Use this to test the task.</span></label>
+    <div class="err" id="err"></div>
+    <button id="go">Continue</button>
+    <button class="alt" id="dl-all">Download all saved sessions</button>`;
+  $('#go').onclick = () => {
+    const v = id => $('#'+id).value.trim();
+    const err = m => { $('#err').textContent = m; };
+    if (!v('pid') || +v('pid') < 1) return err('Enter a participant number of 1 or higher.');
+    if (!v('age') || +v('age') < 16 || +v('age') > 80) return err('Enter an age between 16 and 80.');
+    if (!v('gender')) return err('Select a gender option.');
+    if (!v('course')) return err('Enter your course.');
+    if (!/^\S+@\S+\.\S+$/.test(v('email'))) return err('Enter a valid email address.');
+    if (!$('#consent').checked) return err('Tick the consent box to continue.');
+    CFG = $('#dry').checked ? DRY : REAL;
+    const n = +v('pid');
+    P = {participant_id:n, age:+v('age'), gender:v('gender'), course:v('course'), email:v('email'),
+         run_mode: CFG===DRY ? 'dry' : 'real',
+         validity_pct: n%2===1 ? 85 : 70,
+         mapping: Math.floor((n-1)/2)%2===0 ? 'A' : 'B'};
+    renderInstructions();
+  };
+  $('#dl-all').onclick = () => {
+    let all = []; try { all = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) {}
+    if (!all.length) return $('#err').textContent = 'No saved sessions on this computer yet.';
+    download(toCSV(all), 'HRR_all_participants.csv');
+  };
+}
+
+function renderInstructions() {
+  scr.innerHTML = `
+    <h1>How the task works</h1>
+    <p>A <b>shape</b> appears in the centre of the screen: a blue circle or an orange diamond. A moment later a white square appears on the <b>left</b> or the <b>right</b>.</p>
+    <p>Press <kbd>F</kbd> if the square is on the left and <kbd>J</kbd> if it is on the right. Respond as <b>fast</b> and as <b>accurately</b> as you can.</p>
+    <p>The shape may give you a hint about where the square will appear. Use it if you find it helpful.</p>
+    <p>Now and then the task stops and asks where you expect the square to appear after a shape. Answer with <kbd>F</kbd> or <kbd>J</kbd>, then rate how sure you are from <kbd>1</kbd> (guessing) to <kbd>4</kbd> (certain).</p>
+    <p class="mute">First there are ${CFG.practice} practice trials with feedback.</p>
+    <button id="start">Start practice</button>`;
+  $('#start').onclick = runAll;
+}
+
+/* ---------- trial ---------- */
+async function trial(cue, side, feedback) {
+  show(FIX); await sleep(CFG.fixMs);
+  show(cueHTML(cue)); await frame(); const tCue = performance.now(); await sleep(CFG.cueMs);
+  show(FIX); await sleep(CFG.isiMs);
+  show(targetHTML(side)); await frame();
+  const tTgt = performance.now();
+  const r = await waitKey(['f','j'], CFG.maxRT);
+  const resp = r ? (r.key==='f' ? 'left' : 'right') : '';
+  const correct = resp === side;
+  if (feedback) { show(`<div class="msg">${!r ? 'Too slow' : correct ? 'Correct' : 'Wrong key'}</div>`); await sleep(600); }
+  show(FIX); await sleep(CFG.itiMin + Math.random()*(CFG.itiMax-CFG.itiMin));
+  return {response:resp, correct:correct?1:0, RT: r ? Math.round(r.rt) : '', timeout: r ? 0 : 1,
+          anticipation: r && r.rt<150 ? 1 : 0, soa_actual_ms: Math.round(tTgt - tCue)};
+}
+
+async function probe(cue, ph, trialNo) {
+  show(`<div class="msg">Where do you expect the square to appear after this shape?</div>${cueHTML(cue)}<div class="sub"><kbd>F</kbd> left &nbsp; <kbd>J</kbd> right</div>`);
+  const a = await waitKey(['f','j']);
+  const side = a.key==='f' ? 'left' : 'right';
+  show(`<div class="msg">How sure are you?</div><div class="sub"><kbd>1</kbd> guessing &nbsp; <kbd>2</kbd> unsure &nbsp; <kbd>3</kbd> fairly sure &nbsp; <kbd>4</kbd> certain</div>`);
+  const c = await waitKey(['1','2','3','4']);
+  show(FIX); await sleep(500);
+  return {row_type:'probe', trial:trialNo, phase:ph, phase_name:PHASE_NAMES[ph], cue,
+          probe_expected_side:side, rule_side:ruleSide(cue,ph), explicit_matches_rule: side===ruleSide(cue,ph) ? 1 : 0,
+          probe_confidence:+c.key, RT_probe_ms:Math.round(a.rt)};
+}
+
+async function runAll() {
+  rows = [];
+  show(`<div class="msg">Practice<div class="sub">Press <kbd>Space</kbd> to begin</div></div>`); await waitKey([' ']);
+  for (let i=0;i<CFG.practice;i++) {            // practice: no cue-target relationship (random side)
+    await trial(i%2 ? 'blue' : 'orange', Math.random()<.5 ? 'left' : 'right', true);
+  }
+  show(`<div class="msg">Practice complete.<div class="sub">Press <kbd>Space</kbd> to start the task</div></div>`); await waitKey([' ']);
+
+  const v = P.validity_pct/100;
+  let n = 0;
+  for (let p=0;p<3;p++) {
+    const list = buildPhase(p+1, CFG.phases[p], v);
+    for (let i=0;i<list.length;i++) {
+      const t = list[i]; n++;
+      const rs = ruleSide(t.cue, t.phase);
+      const side = t.valid ? rs : opp(rs);
+      const res = await trial(t.cue, side, false);
+      rows.push({row_type:'trial', participant_id:P.participant_id, age:P.age, gender:P.gender, course:P.course, email:P.email,
+                 run_mode:P.run_mode, validity_pct:P.validity_pct, mapping:P.mapping,
+                 trial:n, phase:t.phase, phase_name:PHASE_NAMES[t.phase], trial_in_phase:i+1,
+                 cue:t.cue, rule_side:rs, target_side:side, validity:t.valid?'valid':'invalid', ...res,
+                 timestamp:new Date().toISOString()});
+      if (n % CFG.probeEvery === 0) {
+        const pr = await probe(Math.random()<.5 ? 'blue' : 'orange', t.phase, n);
+        rows.push({participant_id:P.participant_id, age:P.age, gender:P.gender, course:P.course, email:P.email,
+                   run_mode:P.run_mode, validity_pct:P.validity_pct, mapping:P.mapping, ...pr, timestamp:new Date().toISOString()});
+      }
+    }
+  }
+  show(`<div class="msg">Last question.<br><br>Did you notice that what a shape meant changed at some point?<div class="sub"><kbd>Y</kbd> yes &nbsp; <kbd>N</kbd> no</div></div>`);
+  const q = await waitKey(['y','n']);
+  rows.forEach(r => r.noticed_change = q.key==='y' ? 1 : 0);
+  if (P.run_mode === 'real') {
+    try { const all = JSON.parse(localStorage.getItem(STORE) || '[]'); localStorage.setItem(STORE, JSON.stringify(all.concat(rows))); } catch(e) {}
+  }
+  renderEnd();
+}
+
+/* ---------- results & export ---------- */
+function toCSV(data) {
+  const cols = []; data.forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+  const esc = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+  return [cols.join(','), ...data.map(r => cols.map(c => esc(r[c])).join(','))].join('\n');
+}
+function download(text, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type:'text/csv'}));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+
+function renderEnd() {
+  hideStage();
+  const T = rows.filter(r=>r.row_type==='trial'), Pb = rows.filter(r=>r.row_type==='probe');
+  const body = [1,2,3].map(ph => {
+    const t = T.filter(r=>r.phase===ph);
+    const ok = t.filter(r=>r.correct && !r.anticipation && !r.timeout);
+    const val = mean(ok.filter(r=>r.validity==='valid').map(r=>r.RT));
+    const inv = mean(ok.filter(r=>r.validity==='invalid').map(r=>r.RT));
+    return `<tr><td>${PHASE_NAMES[ph]}</td><td>${fmt(val)}</td><td>${fmt(inv)}</td><td>${fmt(inv-val)}</td><td>${fmt(mean(t.map(r=>r.correct))*100)}%</td><td>${fmt(mean(Pb.filter(r=>r.phase===ph).map(r=>r.explicit_matches_rule))*100)}%</td></tr>`;
+  }).join('');
+  const soa = mean(T.map(r=>r.soa_actual_ms));
+  scr.innerHTML = `
+    <h1>${P.run_mode==='dry' ? 'Dry run complete' : 'Thank you'}</h1>
+    <p class="mute">${P.run_mode==='dry' ? 'Check that the average cue-to-target time is close to 700 ms (now ' + fmt(soa) + ' ms). This data is not saved.' : 'Your data is saved on this computer. Download it now as a backup.'}</p>
+    <p><b>Debrief:</b> the shapes predicted the target side most of the time. Halfway through, the meaning of the shapes was reversed without warning. The task measures how quickly you noticed and adjusted.</p>
+    <table><thead><tr><th>Phase</th><th>Valid RT (ms)</th><th>Invalid RT (ms)</th><th>Cue effect (ms)</th><th>Accuracy</th><th>Rule known</th></tr></thead><tbody>${body}</tbody></table>
+    <button id="dl">Download this participant (CSV)</button>
+    <button class="alt" id="cp">Copy CSV</button>
+    <button class="alt" id="dla">Download all saved sessions</button>
+    <button class="alt" id="next">Next participant</button>
+    <div class="err" id="err"></div>`;
+  const tag = `${P.run_mode==='dry'?'DRY_':''}P${String(P.participant_id).padStart(2,'0')}`;
+  $('#dl').onclick = () => download(toCSV(rows), `HRR_${tag}.csv`);
+  $('#cp').onclick = async () => { try { await navigator.clipboard.writeText(toCSV(rows)); $('#err').style.color='var(--accent)'; $('#err').textContent='Copied. Paste into a Sheet.'; } catch(e) { $('#err').textContent='Copy failed. Use Download instead.'; } };
+  $('#dla').onclick = () => { let all=[]; try { all = JSON.parse(localStorage.getItem(STORE)||'[]'); } catch(e) {} if (!all.length) return $('#err').textContent='No saved sessions yet.'; download(toCSV(all), 'HRR_all_participants.csv'); };
+  $('#next').onclick = renderForm;
+}
+
+renderForm();
+</script>
+</body>
+</html>
