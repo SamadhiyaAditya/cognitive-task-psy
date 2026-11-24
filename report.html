@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HRR task: results report</title>
+<style>
+body{font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#1d2127;background:#fff;margin:0}
+main{max-width:860px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.2rem;margin:2rem 0 .5rem;border-bottom:1px solid #ddd;padding-bottom:.25rem}
+table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.9rem}th,td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid #e5e5e5}th{background:#f6f6f4}
+button{padding:.55rem 1rem;border:0;border-radius:6px;background:#1f7a6c;color:#fff;font:inherit;font-weight:600;cursor:pointer;margin:.3rem .4rem .3rem 0}
+button.alt{background:#fff;color:#1d2127;border:1px solid #bbb}
+.mute{color:#666}.err{color:#b3392b}svg{width:100%;height:auto;max-width:640px;font-family:inherit}
+.legend span{display:inline-block;margin-right:1rem}.legend i{display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:-1px}
+.heat td{text-align:center;font-variant-numeric:tabular-nums}
+@media print{.noprint{display:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>Hidden Rule Reversal task: results report</h1>
+<p class="mute">Generated from the live Google Sheet. Cue effect = mean RT on invalid trials minus mean RT on valid trials (correct, non-anticipatory responses only).</p>
+<div class="noprint"><button id="refresh">Refresh data</button><button class="alt" id="print">Print / save as PDF</button><button class="alt" id="csv">Download participant summary (CSV)</button><button class="alt" id="back">Back to task</button></div>
+<div id="out"></div>
+</main>
+<script>
+const SCRIPT_URL = 'https://script.google.com/a/macros/nst.rishihood.edu.in/s/AKfycbxzLY-F1NbvFBCLKxhX9Lpy37sV5FNMqTNZ28NYUW0gh8SliC3_bAtlUCVvDEPEot6m/exec';   // same URL as in index.html
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const f = (v,d=1) => Number.isFinite(v) ? v.toFixed(d) : '–';
+const P = p => !Number.isFinite(p) ? '–' : p < .001 ? '< .001' : p.toFixed(3);
+const sum = a => a.reduce((x,y)=>x+y,0), mean = a => sum(a)/a.length;
+const sd = a => { const m = mean(a); return Math.sqrt(sum(a.map(x=>(x-m)**2))/(a.length-1)); };
+const fin = Number.isFinite;
+
+/* ---- statistics (t, F and r p-values via the regularised incomplete beta function) ---- */
+function lgamma(x){const c=[76.18009172947146,-86.50532032941677,24.01409824083091,-1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];let y=x,t=x+5.5;t-=(x+.5)*Math.log(t);let s=1.000000000190015;for(const k of c)s+=k/++y;return -t+Math.log(2.5066282746310005*s/x);}
+function betacf(a,b,x){const qab=a+b,qap=a+1,qam=a-1;let c=1,d=1-qab*x/qap;if(Math.abs(d)<1e-30)d=1e-30;d=1/d;let h=d;for(let m=1;m<=200;m++){const m2=2*m;let aa=m*(b-m)*x/((qam+m2)*(a+m2));d=1+aa*d;if(Math.abs(d)<1e-30)d=1e-30;c=1+aa/c;if(Math.abs(c)<1e-30)c=1e-30;d=1/d;h*=d*c;aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2));d=1+aa*d;if(Math.abs(d)<1e-30)d=1e-30;c=1+aa/c;if(Math.abs(c)<1e-30)c=1e-30;d=1/d;const del=d*c;h*=del;if(Math.abs(del-1)<3e-7)break;}return h;}
+function ibeta(x,a,b){if(x<=0)return 0;if(x>=1)return 1;const bt=Math.exp(lgamma(a+b)-lgamma(a)-lgamma(b)+a*Math.log(x)+b*Math.log(1-x));return x<(a+1)/(a+b+2)?bt*betacf(a,b,x)/a:1-bt*betacf(b,a,1-x)/b;}
+const pT = (t,df) => ibeta(df/(df+t*t), df/2, .5);
+const pF = (F,d1,d2) => ibeta(d2/(d2+d1*F), d2/2, d1/2);
+function oneT(a){const n=a.length,m=mean(a),s=sd(a),t=m/(s/Math.sqrt(n));return{n,m,s,t,df:n-1,p:pT(t,n-1),d:m/s};}
+const pairT = (a,b) => oneT(a.map((x,i)=>x-b[i]));
+function welch(a,b){const va=sd(a)**2/a.length,vb=sd(b)**2/b.length,t=(mean(a)-mean(b))/Math.sqrt(va+vb),df=(va+vb)**2/(va**2/(a.length-1)+vb**2/(b.length-1));return{t,df,p:pT(t,df),ma:mean(a),mb:mean(b)};}
+function pearson(x,y){const n=x.length,mx=mean(x),my=mean(y);let sxy=0,sxx=0,syy=0;for(let i=0;i<n;i++){sxy+=(x[i]-mx)*(y[i]-my);sxx+=(x[i]-mx)**2;syy+=(y[i]-my)**2;}const r=sxy/Math.sqrt(sxx*syy);return{r,n,p:n>2?pT(r*Math.sqrt((n-2)/(1-r*r)),n-2):NaN};}
+function anova(gs){const all=gs.flat(),N=all.length,k=gs.length,gm=mean(all);let ssb=0,ssw=0;gs.forEach(g=>{const m=mean(g);ssb+=g.length*(m-gm)**2;ssw+=sum(g.map(x=>(x-m)**2));});const F=(ssb/(k-1))/(ssw/(N-k));return{F,d1:k-1,d2:N-k,p:pF(F,k-1,N-k)};}
+
+/* ---- one summary row per participant ---- */
+function summarise(rows){
+  const by = {}; rows.forEach(r => (by[r.participant_id] = by[r.participant_id] || []).push(r));
+  return Object.values(by).map(rs => {
+    const T = rs.filter(r=>r.row_type==='trial'), Pb = rs.filter(r=>r.row_type==='probe'), h = rs[0];
+    const ok = T.filter(r=>+r.correct===1 && +r.anticipation===0 && +r.timeout===0 && r.RT!=='');
+    const eff = (ph,lo,hi) => { const s = ok.filter(r=>+r.phase===ph && +r.trial_in_phase>=lo && +r.trial_in_phase<=hi);
+      const v = s.filter(r=>r.validity==='valid').map(r=>+r.RT), i = s.filter(r=>r.validity==='invalid').map(r=>+r.RT);
+      return v.length && i.length ? mean(i)-mean(v) : NaN; };
+    const ex = ph => { const s = Pb.filter(r=>+r.phase===ph); return s.length ? mean(s.map(r=>+r.explicit_matches_rule))*100 : NaN; };
+    const o = {id:h.participant_id, age:+h.age, gender:String(h.gender), course:String(h.course), group:+h.validity_pct, noticed:+h.noticed_change,
+      P1:eff(1,1,999), P2a:eff(2,1,30), P2b:eff(2,31,999), P3:eff(3,1,999),
+      acc:mean(T.map(r=>+r.correct))*100, rt:mean(ok.map(r=>+r.RT)), exp1:ex(1), exp2:ex(2)};
+    o.cost = o.P1 - o.P2a; o.recov = o.P2b - o.P2a; return o;
+  });
+}
+
+/* ---- charts (inline SVG) ---- */
+function bars(cats, series){
+  const W=640,H=320,L=56,B=44,T=14,R=10;
+  const vals = series.flatMap(s=>s.m.flatMap((m,i)=>[m-s.se[i],m+s.se[i]])).filter(fin).concat(0);
+  let lo=Math.min(...vals), hi=Math.max(...vals); const pad=(hi-lo)*.1||10; lo-=pad; hi+=pad;
+  const y = v => T+(hi-v)/(hi-lo)*(H-T-B), gw=(W-L-R)/cats.length, bw=gw*.78/series.length;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cue effect by phase">`;
+  for(let i=0;i<=5;i++){const v=lo+(hi-lo)*i/5; s+=`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="#e3e3e3"/><text x="${L-6}" y="${y(v)+4}" text-anchor="end" font-size="11">${v.toFixed(0)}</text>`;}
+  s += `<line x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}" stroke="#444"/>`;
+  cats.forEach((c,i)=>{ const x0=L+i*gw+gw*.11;
+    series.forEach((se,j)=>{ const m=se.m[i]; if(!fin(m)) return; const x=x0+j*bw, yy=y(m), cx=x+(bw-3)/2;
+      s+=`<rect x="${x}" y="${Math.min(yy,y(0))}" width="${bw-3}" height="${Math.abs(yy-y(0))}" fill="${se.color}"/>`;
+      if(fin(se.se[i])) s+=`<line x1="${cx}" x2="${cx}" y1="${y(m-se.se[i])}" y2="${y(m+se.se[i])}" stroke="#222"/>`; });
+    s+=`<text x="${L+i*gw+gw/2}" y="${H-24}" text-anchor="middle" font-size="12">${c}</text>`; });
+  s += `<text transform="translate(13 ${(T+H-B)/2}) rotate(-90)" text-anchor="middle" font-size="12">Cue effect (ms)</text></svg>`;
+  return s + `<div class="legend">${series.map(x=>`<span><i style="background:${x.color}"></i>${x.name}</span>`).join('')}<span class="mute">Error bars: ±1 SE</span></div>`;
+}
+function scatter(xs,ys,xl,yl){
+  const W=640,H=320,L=60,B=44,T=14,R=14;
+  const mnx=Math.min(...xs),mxx=Math.max(...xs),mny=Math.min(...ys),mxy=Math.max(...ys);
+  const px=(mxx-mnx||1)*.08, py=(mxy-mny||1)*.1, x0=mnx-px,x1=mxx+px,y0=mny-py,y1=mxy+py;
+  const X=v=>L+(v-x0)/(x1-x0)*(W-L-R), Y=v=>T+(y1-v)/(y1-y0)*(H-T-B);
+  let s=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${xl} against ${yl}">`;
+  for(let i=0;i<=4;i++){const v=y0+(y1-y0)*i/4,u=x0+(x1-x0)*i/4; s+=`<line x1="${L}" x2="${W-R}" y1="${Y(v)}" y2="${Y(v)}" stroke="#e3e3e3"/><text x="${L-6}" y="${Y(v)+4}" text-anchor="end" font-size="11">${v.toFixed(0)}</text><text x="${X(u)}" y="${H-26}" text-anchor="middle" font-size="11">${u.toFixed(0)}</text>`;}
+  xs.forEach((x,i)=>s+=`<circle cx="${X(x)}" cy="${Y(ys[i])}" r="4.5" fill="#1f7a6c" fill-opacity=".75"/>`);
+  const r=pearson(xs,ys);
+  if(xs.length>2 && fin(r.r)){const m=mean(xs),my=mean(ys),sl=r.r*sd(ys)/sd(xs),a=x=>my+sl*(x-m);s+=`<line x1="${X(x0)}" y1="${Y(a(x0))}" x2="${X(x1)}" y2="${Y(a(x1))}" stroke="#b3392b" stroke-width="1.5"/>`;}
+  return s+`<text x="${(L+W)/2}" y="${H-6}" text-anchor="middle" font-size="12">${xl}</text><text transform="translate(13 ${(T+H-B)/2}) rotate(-90)" text-anchor="middle" font-size="12">${yl}</text></svg>`;
+}
+
+/* ---- report ---- */
+const M = [['P1','Cue effect, acquisition (ms)'],['cost','Reversal cost (ms)'],['recov','Recovery (ms)'],['exp2','Rule knowledge after reversal (%)'],['acc','Accuracy (%)'],['rt','Mean RT (ms)']];
+function cmp(S, fa, fb){
+  return M.map(([k,n])=>{
+    const a=S.filter(fa).map(s=>s[k]).filter(fin), b=S.filter(fb).map(s=>s[k]).filter(fin);
+    if(a.length<2||b.length<2) return `<tr><td>${n}</td><td colspan="4" class="mute">not enough data yet</td></tr>`;
+    const w=welch(a,b);
+    return `<tr><td>${n}</td><td>${f(w.ma)} (n=${a.length})</td><td>${f(w.mb)} (n=${b.length})</td><td>t(${f(w.df)}) = ${f(w.t,2)}</td><td>${P(w.p)}</td></tr>`;
+  }).join('');
+}
+const cmpTable = (title,la,lb,body) => `<h3>${title}</h3><table><thead><tr><th>Measure</th><th>${la}</th><th>${lb}</th><th>Welch t-test</th><th>p</th></tr></thead><tbody>${body}</tbody></table>`;
+
+let LAST = [];
+function build(rows){
+  const out = $('#out'), S = summarise(rows); LAST = S;
+  if(S.length < 3){ out.innerHTML = `<p class="err">Only ${S.length} participant(s) in the sheet. Collect at least 20 for a meaningful report.</p>`; return; }
+  const ages = S.map(s=>s.age).filter(fin), cnt = k => { const c={}; S.forEach(s=>{const v=(s[k]+'').trim().toLowerCase(); c[v]=(c[v]||0)+1;}); return Object.entries(c).map(([a,b])=>`${esc(a)} (${b})`).join(', '); };
+  let h = `<h2>1. Sample</h2><p><b>N = ${S.length}</b> participants. Validity 85%: ${S.filter(s=>s.group===85).length}, validity 70%: ${S.filter(s=>s.group===70).length}.
+    Age: M = ${f(mean(ages))}, SD = ${f(sd(ages))}, range ${Math.min(...ages)}–${Math.max(...ages)}.<br>Gender: ${cnt('gender')}.<br>Course: ${cnt('course')}.</p>`;
+
+  const PH = [['P1','Acquisition (phase 1)'],['P2a','Early reversal (phase 2, first 30 trials)'],['P2b','Late reversal (phase 2, last 30 trials)'],['P3','Re-reversal (phase 3)']];
+  h += `<h2>2. Cue effect by phase</h2><table><thead><tr><th>Phase</th><th>M (ms)</th><th>SD</th><th>vs 0</th><th>p</th><th>d</th></tr></thead><tbody>` +
+    PH.map(([k,n])=>{const a=S.map(s=>s[k]).filter(fin); if(a.length<3)return `<tr><td>${n}</td><td colspan="5" class="mute">not enough data</td></tr>`; const t=oneT(a); return `<tr><td>${n}</td><td>${f(t.m)}</td><td>${f(t.s)}</td><td>t(${t.df}) = ${f(t.t,2)}</td><td>${P(t.p)}</td><td>${f(t.d,2)}</td></tr>`;}).join('') + `</tbody></table>`;
+  const grp = g => PH.map(([k])=>{const a=S.filter(s=>s.group===g).map(s=>s[k]).filter(fin); return a.length?mean(a):NaN;});
+  const grpSe = g => PH.map(([k])=>{const a=S.filter(s=>s.group===g).map(s=>s[k]).filter(fin); return a.length>1?sd(a)/Math.sqrt(a.length):NaN;});
+  h += bars(['Acquisition','Early reversal','Late reversal','Re-reversal'], [
+    {name:'Validity 85%',color:'#4a90e2',m:grp(85),se:grpSe(85)}, {name:'Validity 70%',color:'#f0a030',m:grp(70),se:grpSe(70)}]);
+
+  const pr = (a,b) => { const z=S.filter(s=>fin(s[a])&&fin(s[b])); return z.length>2 ? pairT(z.map(s=>s[a]),z.map(s=>s[b])) : null; };
+  h += `<h2>3. Effect of the reversal (paired t-tests)</h2><table><thead><tr><th>Comparison</th><th>Mean difference (ms)</th><th>t</th><th>p</th><th>d<sub>z</sub></th></tr></thead><tbody>` +
+    [['P1','P2a','Acquisition − early reversal (reversal cost)'],['P2b','P2a','Late − early reversal (recovery)'],['P3','P2a','Re-reversal − early reversal']].map(([a,b,n])=>{const t=pr(a,b); return t?`<tr><td>${n}</td><td>${f(t.m)}</td><td>t(${t.df}) = ${f(t.t,2)}</td><td>${P(t.p)}</td><td>${f(t.d,2)}</td></tr>`:`<tr><td>${n}</td><td colspan="4" class="mute">not enough data</td></tr>`;}).join('') + `</tbody></table>`;
+
+  h += `<h2>4. Group differences</h2>` +
+    cmpTable('Cue validity','85%','70%',cmp(S,s=>s.group===85,s=>s.group===70)) +
+    cmpTable('Gender','Female','Male',cmp(S,s=>s.gender.toLowerCase()==='female',s=>s.gender.toLowerCase()==='male')) +
+    cmpTable('Noticed the rule change','Yes','No',cmp(S,s=>s.noticed===1,s=>s.noticed===0));
+  const cg = {}; S.forEach(s=>(cg[s.course.trim().toLowerCase()] = cg[s.course.trim().toLowerCase()]||[]).push(s));
+  const cs = Object.values(cg).filter(g=>g.length>=2);
+  h += `<h3>Course (one-way ANOVA, courses with at least 2 participants)</h3>`;
+  if(cs.length>=2) h += `<table><thead><tr><th>Measure</th><th>F</th><th>p</th></tr></thead><tbody>` + [['P1','Cue effect, acquisition'],['cost','Reversal cost']].map(([k,n])=>{const gs=cs.map(g=>g.map(s=>s[k]).filter(fin)).filter(g=>g.length>=2); if(gs.length<2)return''; const a=anova(gs); return `<tr><td>${n}</td><td>F(${a.d1}, ${a.d2}) = ${f(a.F,2)}</td><td>${P(a.p)}</td></tr>`;}).join('') + `</tbody></table>`;
+  else h += `<p class="mute">Not enough participants per course yet.</p>`;
+
+  const V = [['age','Age'],['P1','Cue effect P1'],['cost','Reversal cost'],['recov','Recovery'],['P3','Cue effect P3'],['acc','Accuracy'],['rt','Mean RT'],['exp2','Rule knowledge P2']];
+  const cr = (a,b) => { const z=S.filter(s=>fin(s[a])&&fin(s[b])); return z.length>2 ? pearson(z.map(s=>s[a]),z.map(s=>s[b])) : {r:NaN,p:NaN,n:z.length}; };
+  h += `<h2>5. Correlations</h2><h3>With age</h3><table><thead><tr><th>Measure</th><th>r</th><th>n</th><th>p</th></tr></thead><tbody>` +
+    V.slice(1).map(([k,n])=>{const c=cr('age',k); return `<tr><td>${n}</td><td>${f(c.r,2)}</td><td>${c.n}</td><td>${P(c.p)}</td></tr>`;}).join('') + `</tbody></table>`;
+  const za = S.filter(s=>fin(s.age)&&fin(s.cost));
+  if(za.length>2) h += `<h3>Age and reversal cost</h3>` + scatter(za.map(s=>s.age), za.map(s=>s.cost), 'Age (years)', 'Reversal cost (ms)');
+  h += `<h3>Correlation matrix (Pearson r)</h3><table class="heat"><thead><tr><th></th>${V.map(v=>`<th>${v[1]}</th>`).join('')}</tr></thead><tbody>` +
+    V.map(([a,an])=>`<tr><th>${an}</th>${V.map(([b])=>{const c=a===b?{r:1,p:NaN}:cr(a,b); const bg=fin(c.r)?`rgba(${c.r>0?'31,122,108':'179,57,43'},${Math.abs(c.r).toFixed(2)})`:'#fff'; return `<td style="background:${bg}" title="p = ${P(c.p)}">${f(c.r,2)}</td>`;}).join('')}</tr>`).join('') + `</tbody></table>`;
+
+  h += `<h2>6. Notes</h2><p class="mute">Early-reversal cue effects rest on few invalid trials per person, so they are noisy. Correlations and group differences with small samples are exploratory. Participants with missing values for a measure are left out of that test only.</p>`;
+  out.innerHTML = h;
+}
+
+async function load(){
+  const out = $('#out');
+  if(!SCRIPT_URL.startsWith('https://')){ out.innerHTML = '<p class="err">Set SCRIPT_URL at the top of report.html to your Apps Script web app URL.</p>'; return; }
+  out.innerHTML = '<p class="mute">Loading data…</p>';
+  try { const r = await fetch(SCRIPT_URL); const rows = await r.json(); build(rows.filter(x => x.run_mode !== 'dry')); }
+  catch(e){ out.innerHTML = '<p class="err">Could not load data from the sheet. Check that the script is deployed with access set to Anyone, and that the URL is correct.</p>'; }
+}
+$('#refresh').onclick = load;
+$('#print').onclick = () => window.print();
+$('#back').onclick = () => { location.href = 'index.html'; };
+$('#csv').onclick = () => {
+  if(!LAST.length) return;
+  const cols = Object.keys(LAST[0]);
+  const t = [cols.join(','), ...LAST.map(s => cols.map(c => `"${String(s[c]).replace(/"/g,'""')}"`).join(','))].join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([t],{type:'text/csv'})); a.download = 'HRR_participant_summary.csv'; a.click();
+};
+load();
+</script>
+</body>
+</html>
