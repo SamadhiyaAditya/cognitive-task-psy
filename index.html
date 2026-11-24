@@ -53,7 +53,7 @@ const REAL = {fixMs:500, cueMs:500, isiMs:200, maxRT:1500, itiMin:600, itiMax:10
 const DRY  = {...REAL, phases:[8,8,8], probeEvery:8, practice:2};
 const PHASE_NAMES = {1:'Acquisition', 2:'Reversal', 3:'Re-reversal'};
 const STORE = 'hrr_all_rows';
-const SCRIPT_URL = 'https://script.google.com/a/macros/nst.rishihood.edu.in/s/AKfycbxzLY-F1NbvFBCLKxhX9Lpy37sV5FNMqTNZ28NYUW0gh8SliC3_bAtlUCVvDEPEot6m/exec';   // Google Apps Script web app URL (see setup steps)
+const SCRIPT_URL = 'https://script.google.com/a/macros/nst.rishihood.edu.in/s/AKfycbxAwo1rpr-RjyWtqttd-JJL060Q6e9EMxczmLpb1SpBmqtyMvhv7_NCYszYlsCFD2_dtw/exec';   // Google Apps Script web app URL (see setup steps)
 const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) || matchMedia('(hover:none) and (pointer:coarse)').matches;
 async function sendToSheet(data) {
   if (!SCRIPT_URL.startsWith('https://')) return 'sheet not configured';
