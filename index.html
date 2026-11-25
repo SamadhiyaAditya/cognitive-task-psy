@@ -53,10 +53,7 @@ const REAL = {fixMs:500, cueMs:500, isiMs:200, maxRT:1500, itiMin:600, itiMax:10
 const DRY  = {...REAL, phases:[8,8,8], probeEvery:8, practice:2};
 const PHASE_NAMES = {1:'Acquisition', 2:'Reversal', 3:'Re-reversal'};
 const STORE = 'hrr_all_rows';
-const SCRIPT_URL = 'https://script.google.com/a/macros/nst.rishihood.edu.in/s/AKfycbxzLY-F1NbvFBCLKxhX9Lpy37sV5FNMqTNZ28NYUW0gh8SliC3_bAtlUCVvDEPEot6m/exec';   // Google Apps Script web app URL (see setup steps)
-// phones, and iPads (which report as Macintosh but have a touch screen); MacBooks have no touch points
-const IS_MOBILE = /Android|iPhone|iPod|Mobi/i.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-let FORCE = false;
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxAwo1rpr-RjyWtqttd-JJL060Q6e9EMxczmLpb1SpBmqtyMvhv7_NCYszYlsCFD2_dtw/exec';
 async function sendToSheet(data) {
   if (!SCRIPT_URL.startsWith('https://')) return 'sheet not configured';
   try { await fetch(SCRIPT_URL, {method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(data)}); return 'sent'; }
@@ -103,14 +100,6 @@ function buildPhase(ph, N, v) {
 /* ---------- screens ---------- */
 function renderForm() {
   hideStage();
-  if (IS_MOBILE && !FORCE) {
-    scr.innerHTML = `<h1>Please use a laptop or desktop</h1>
-      <p>This task needs a physical keyboard (<kbd>F</kbd>, <kbd>J</kbd> and number keys) and a larger screen for accurate timing, so it cannot be done on a phone or tablet.</p>
-      <p class="mute">Open this same link in Chrome or Edge on a laptop or desktop computer.</p>
-      <button class="alt" id="force">I'm on a laptop with a keyboard, continue</button>`;
-    $('#force').onclick = () => { FORCE = true; renderForm(); };
-    return;
-  }
   scr.innerHTML = `
     <h1>Hidden Rule Reversal task</h1>
     <p class="mute">A short reaction and prediction task. It takes about 10 minutes. Use a laptop or desktop with a physical keyboard.</p>
