@@ -1,0 +1,4 @@
+participant_id,session_id,run_mode,status,validity_pct,mapping,age,gender,course,email,noticed_change,trials_saved,probes_saved,tab_hidden_count,practice_rounds,practice_correct,timeout_warnings,started_at,completed_at,user_agent,screen,refresh_hz,app_version
+1,legacy-P01,real,complete,85,A,20,Male,B.Tech CSE (AI),chhabraaranav@gmail.com,0,160.0,8.0,,,,,2026-11-26T17:05:41.172Z,2026-11-26T17:15:08.187Z,,,,1.x (legacy)
+,legacy-excluded-1,real,excluded,85,A,20,Male,BTech CSE,ukyash5@gmail.com,0,,,,,,,2026-11-26T17:12:34.620Z,,,,,"1.x (legacy) – EXCLUDED: task ran 3x in parallel (double-start bug), shared key presses; sheet has each row 3 times"
+2,legacy-P02,real,excluded_no_responses,85,A,29,Female,MBBS,1.pallavinegi@gmail.com,1,160.0,8.0,,,,,2026-11-26T17:20:28.885Z,2026-11-26T17:31:51.851Z,,,,1.x (legacy) – EXCLUDED from RT/accuracy: 160/160 main trials timed out (no key press); probe answers valid

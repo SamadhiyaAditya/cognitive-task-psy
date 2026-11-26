@@ -37,6 +37,9 @@ th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}
 .notice{background:var(--panel);border-left:4px solid var(--accent);padding:1rem 1.1rem;margin:1.2rem 0;border-radius:0 6px 6px 0;font-size:.95rem;line-height:1.6}
 .notice ul{margin:.4rem 0 0;padding-left:1.2rem}
 .notice li{margin:.3rem 0}
+.banner{background:#4a2a26;border-left:4px solid var(--bad);padding:.8rem 1rem;border-radius:0 6px 6px 0;margin:1rem 0}
+.ok{color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -44,43 +47,109 @@ th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}
 <div id="stage" aria-live="polite"></div>
 
 <script>
-/* ===== Hidden Rule Reversal (HRR) task =====
+/* ===== Hidden Rule Reversal (HRR) task — v2 =====
    Measures how people build a mental model of a cue-target rule and how fast they revise it when the rule silently reverses.
    Trial: fixation 500 ms -> cue (blue circle | orange diamond) 500 ms -> ISI 200 ms (SOA 700 ms) -> target left/right
           until response (max 1500 ms, keys F = left, J = right) -> ITI 600-1000 ms.
    Phases: 1 Acquisition (rule A), 2 Reversal (rule flipped, unannounced), 3 Re-reversal (rule A again).
-   Between-subject: cue validity 85% (odd IDs) vs 70% (even IDs).  Mapping A/B counterbalanced across IDs.
-   Prediction probes (where do you expect the target? + confidence) every `probeEvery` trials. */
+   Between-subject: cue validity 85% vs 70%, cue-side mapping A vs B. The SERVER assigns the participant ID and
+   balances the four condition cells, so participants never type an ID.
+   Prediction probes (expected side + confidence) every `probeEvery` trials, cue alternates blue/orange.
+
+   Data safety:
+   - Server is checked before the form can be submitted (blocks start if data could not be saved).
+   - Rows are sent after every block and confirmed by the server; resending is harmless (row_key dedupe).
+   - Anything not confirmed is kept in this browser and retried on next page load.
+   - The task can only run once per page load (no double-start).
+   - Test runs: open index.html?test=1  -> stored in separate *_test tabs. Researcher tools: index.html?admin=1 */
+
+const APP_VERSION = '2.0';
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxAwo1rpr-RjyWtqttd-JJL060Q6e9EMxczmLpb1SpBmqtyMvhv7_NCYszYlsCFD2_dtw/exec';
+const QS = new URLSearchParams(location.search);
+const RUN_MODE = QS.has('test') ? 'test' : 'real';
+const ADMIN = QS.has('admin');
+const FAST = RUN_MODE === 'test' && QS.has('fast');          // automated testing only: shortens all timings
 
 const REAL = {fixMs:500, cueMs:500, isiMs:200, maxRT:1500, itiMin:600, itiMax:1000, phases:[60,60,40], probeEvery:20, practice:6};
+const CFG = FAST ? {...REAL, fixMs:20, cueMs:20, isiMs:10, maxRT:150, itiMin:10, itiMax:20} : REAL;
 const PHASE_NAMES = {1:'Acquisition', 2:'Reversal', 3:'Re-reversal'};
-const STORE = 'hrr_all_rows';
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxAwo1rpr-RjyWtqttd-JJL060Q6e9EMxczmLpb1SpBmqtyMvhv7_NCYszYlsCFD2_dtw/exec';
-async function sendToSheet(data) {
-  if (!SCRIPT_URL.startsWith('https://')) return 'sheet not configured';
-  try { await fetch(SCRIPT_URL, {method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(data)}); return 'sent'; }
-  catch(e) { return 'network error'; }
-}
+const BACKUP = 'hrr_backup_v2', PENDING = 'hrr_pending_v2';
 
+/* ---------- server ---------- */
+async function api(body, tries = 4) {
+  let last = 'network error';
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(SCRIPT_URL, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify({...body, run_mode:RUN_MODE})});
+      const j = await r.json();
+      if (j.ok || j.error === 'already_participated' || j.complete === false) return j;
+      last = j.error || 'server error';
+    } catch (e) { last = 'network error'; }
+    await new Promise(r => setTimeout(r, 800 * 2 ** i));
+  }
+  return {ok:false, error:last};
+}
+async function ping() {
+  try { const r = await fetch(SCRIPT_URL + '?action=ping'); const j = await r.json(); return !!j.ok; } catch (e) { return false; }
+}
+const MEM = {};      // fallback when localStorage is blocked (private mode, full quota)
+const ls = {
+  get: (k, d) => { try { const v = localStorage.getItem(k); if (v !== null) return JSON.parse(v); } catch (e) {} return k in MEM ? JSON.parse(MEM[k]) : d; },
+  set: (k, v) => { MEM[k] = JSON.stringify(v); try { localStorage.setItem(k, MEM[k]); } catch (e) {} }
+};
+/* pending = {session_id: {rows:[...], complete:{...}|null}} — everything not yet confirmed by the server.
+   flush() removes only what the server confirmed, so rows queued while a request is in flight are never lost. */
+function queue(sid, newRows, completeBody) {
+  const p = ls.get(PENDING, {}); p[sid] = p[sid] || {rows:[], complete:null, run_mode:RUN_MODE};
+  p[sid].rows.push(...newRows); if (completeBody) p[sid].complete = completeBody; ls.set(PENDING, p);
+}
+async function flush(sid) {
+  let q = ls.get(PENDING, {})[sid]; if (!q) return {ok:true, nothing:true};
+  if (q.run_mode && q.run_mode !== RUN_MODE) return {ok:false, error:'mode mismatch'};
+  let res = {ok:true};
+  if (q.rows.length) {
+    const sent = new Set(q.rows.map(r => r.row_key));
+    res = await api({action:'rows', session_id:sid, rows:q.rows}); if (!res.ok) return res;
+    const p = ls.get(PENDING, {}); if (p[sid]) { p[sid].rows = p[sid].rows.filter(r => !sent.has(r.row_key)); ls.set(PENDING, p); }
+  }
+  q = ls.get(PENDING, {})[sid];
+  if (q && q.complete && !q.rows.length) {
+    res = await api(q.complete); if (!res.ok) return res;
+    const p = ls.get(PENDING, {}); delete p[sid]; ls.set(PENDING, p);
+  }
+  return res;
+}
+async function flushAll() { for (const sid of Object.keys(ls.get(PENDING, {}))) await flush(sid); }
+
+/* ---------- utilities ---------- */
 const $ = s => document.querySelector(s);
 const scr = $('#screen'), stage = $('#stage');
-let P = {}, CFG = REAL, rows = [];
+let P = {}, rows = [], rowIdx = 0, STARTED = false;
+let hiddenCount = 0, hiddenFlag = false;
+document.addEventListener('visibilitychange', () => { if (document.hidden) { hiddenCount++; hiddenFlag = true; } });
+window.addEventListener('blur', () => { hiddenFlag = true; });
 
 const shuffle = a => { for (let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; };
 const mean = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : NaN;
 const fmt = (v,d=0) => Number.isFinite(v) ? v.toFixed(d) : '–';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 const sleep = ms => new Promise(r => { const t0=performance.now(); const f=()=>performance.now()-t0>=ms-8 ? r() : requestAnimationFrame(f); f(); });
 const opp = s => s==='left' ? 'right' : 'left';
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+async function refreshHz() { const t = []; let p = performance.now(); for (let i=0;i<30;i++) { await new Promise(r=>requestAnimationFrame(r)); const n = performance.now(); t.push(n-p); p = n; } t.sort((a,b)=>a-b); return Math.round(1000 / t[15]); }
 
 function show(html) { stage.style.display='flex'; stage.innerHTML = html; }
 function hideStage() { stage.style.display='none'; stage.innerHTML=''; }
+
+/* Physical key codes, so the task works with Caps Lock and non-English keyboard layouts. */
+const CODE = {KeyF:'f', KeyJ:'j', Space:' ', KeyY:'y', KeyN:'n', Digit1:'1', Digit2:'2', Digit3:'3', Digit4:'4', Numpad1:'1', Numpad2:'2', Numpad3:'3', Numpad4:'4'};
 function waitKey(keys, timeout) {
   return new Promise(res => {
     const t0 = performance.now(); let done = false;
-    const fin = v => { if (done) return; done = true; removeEventListener('keydown', h); res(v); };
-    const h = e => { if (e.repeat) return; const k = e.key.toLowerCase(); if (!keys.includes(k)) return; e.preventDefault(); fin({key:k, rt:performance.now()-t0}); };
-    addEventListener('keydown', h);
+    const fin = v => { if (done) return; done = true; removeEventListener('keydown', h, true); res(v); };
+    const h = e => { if (e.repeat) return; const k = CODE[e.code] ?? e.key.toLowerCase(); if (!keys.includes(k)) return; e.preventDefault(); fin({key:k, rt:performance.now()-t0}); };
+    addEventListener('keydown', h, true);
     if (timeout) sleep(timeout).then(() => fin(null));
   });
 }
@@ -92,7 +161,6 @@ const targetHTML = side => `<div class="field"><div class="slot">${side==='left'
 /* ---------- rule logic ---------- */
 const baseSide = cue => ((cue==='blue') === (P.mapping==='A')) ? 'left' : 'right';
 const ruleSide = (cue, ph) => ph===2 ? opp(baseSide(cue)) : baseSide(cue);
-
 function buildPhase(ph, N, v) {
   const per = N/2, validPer = Math.round(v*per), t = [];
   ['blue','orange'].forEach(c => { for (let i=0;i<per;i++) t.push({cue:c, valid:i<validPer, phase:ph}); });
@@ -100,53 +168,67 @@ function buildPhase(ph, N, v) {
 }
 
 /* ---------- screens ---------- */
+let serverOK = false;
 function renderForm() {
   hideStage();
   scr.innerHTML = `
     <h1>Hidden Rule Reversal task</h1>
+    ${RUN_MODE==='test' ? '<div class="banner"><b>TEST MODE</b> – data goes to the test tabs, not the real dataset.</div>' : ''}
+    <div id="srv" class="mute">Checking connection to the research server…</div>
     <div class="notice">
-      <b>Important Participation Guidelines:</b>
+      <b>Before you start:</b>
       <ul>
-        <li>⏱️ <b>Duration:</b> Takes about <b>8–10 minutes</b> to complete.</li>
-        <li>⌨️ <b>Physical keyboard required:</b> You will use keys <kbd>F</kbd> and <kbd>J</kbd> (left and right index fingers).</li>
-        <li>🚫 <b>Please do not close or refresh this tab:</b> Responses are recorded during the task, but your data is submitted to the research sheet <b>only at the very end</b> when you reach the "Thank you" screen.</li>
+        <li>⏱️ Takes about <b>8–10 minutes</b>. Do it in one sitting, in a quiet place.</li>
+        <li>💻 Use a <b>laptop or desktop with a physical keyboard</b> (not a phone or tablet). You will use <kbd>F</kbd> and <kbd>J</kbd>.</li>
+        <li>🚫 Do not switch tabs, close or refresh this page until you see the <b>"Thank you"</b> screen.</li>
+        <li>🔁 Take part only once.</li>
       </ul>
     </div>
-    <h2>Participant details</h2>
-    <label for="pid">Participant number</label><input id="pid" type="number" min="1" placeholder="1, 2, 3 …">
-    <label for="age">Age</label><input id="age" type="number" min="16" max="80">
+    <h2>Your details</h2>
+    <label for="age">Age</label><input id="age" type="number" min="16" max="80" inputmode="numeric">
     <label for="gender">Gender</label>
     <select id="gender"><option value="">Select</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Prefer not to say</option></select>
-    <label for="course">Course</label><input id="course" type="text" placeholder="e.g. BA Psychology">
-    <label for="email">Email</label><input id="email" type="email" placeholder="name@example.com">
-    <label class="check"><input id="consent" type="checkbox"><span>I agree to take part. My email is only used by the research team to contact me. Analysis uses my participant number instead.</span></label>
+    <label for="course">Course</label>
+    <select id="course"><option value="">Select</option><option>B.Tech CSE</option><option>B.Tech CSE (AI)</option><option>B.Tech (other branch)</option><option>BBA</option><option>BA Psychology</option><option>MBBS</option><option>Other</option></select>
+    <input id="course_other" type="text" placeholder="Type your course" style="display:none;margin-top:.5rem">
+    <label for="email">Email</label><input id="email" type="email" placeholder="name@example.com" autocomplete="email">
+    <label class="check"><input id="consent" type="checkbox"><span>I agree to take part. My email is stored separately and used only by the research team to contact me; analysis uses an anonymous participant number.</span></label>
     <div class="err" id="err"></div>
-    <button id="go">Continue</button>
-    <button class="alt" id="rep">Make report</button>
-    <button class="alt" id="dl-all">Download all saved sessions</button>`;
-  $('#go').onclick = () => {
+    <button id="go" disabled>Continue</button>
+    ${ADMIN ? '<button class="alt" id="rep">Open report</button><button class="alt" id="dl-all">Download all sessions saved in this browser</button>' : ''}`;
+  $('#course').onchange = () => { $('#course_other').style.display = $('#course').value==='Other' ? 'block' : 'none'; };
+  ping().then(async ok => {
+    serverOK = ok;
+    if (ok) { await flushAll(); $('#srv').innerHTML = '<span class="ok">✓ Connected to the research server.</span>'; $('#go').disabled = false; }
+    else $('#srv').innerHTML = '<div class="banner"><b>Cannot reach the research server.</b> Please do not start — your data would not be saved. Check your internet connection and reload. If this continues, contact the researcher.</div>';
+  });
+  if (matchMedia('(pointer:coarse)').matches && !matchMedia('(any-pointer:fine)').matches)
+    $('#err').textContent = 'This looks like a phone or tablet. Please open this link on a laptop or desktop computer.';
+
+  $('#go').onclick = async () => {
     const v = id => $('#'+id).value.trim();
     const err = m => { $('#err').textContent = m; };
-    if (!v('pid') || +v('pid') < 1) return err('Enter a participant number of 1 or higher.');
-    if (!v('age') || +v('age') < 16 || +v('age') > 80) return err('Enter an age between 16 and 80.');
+    const age = +v('age'), course = v('course')==='Other' ? v('course_other') : v('course');
+    if (!Number.isInteger(age) || age < 16 || age > 80) return err('Enter your age in whole years (16–80).');
     if (!v('gender')) return err('Select a gender option.');
-    if (!v('course')) return err('Enter your course.');
-    if (!/^\S+@\S+\.\S+$/.test(v('email'))) return err('Enter a valid email address.');
+    if (!course) return err('Select or type your course.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v('email'))) return err('Enter a valid email address.');
     if (!$('#consent').checked) return err('Tick the consent box to continue.');
-    CFG = REAL;
-    const n = +v('pid');
-    P = {participant_id:n, age:+v('age'), gender:v('gender'), course:v('course'), email:v('email'),
-         run_mode: 'real',
-         validity_pct: n%2===1 ? 85 : 70,
-         mapping: Math.floor((n-1)/2)%2===0 ? 'A' : 'B'};
+    if (!serverOK) return err('Not connected to the research server yet.');
+    $('#go').disabled = true; err(''); $('#srv').textContent = 'Setting up your session…';
+    const hz = await refreshHz();
+    const res = await api({action:'start', age, gender:v('gender'), course, email:v('email').toLowerCase(),
+      user_agent:navigator.userAgent, screen:`${screen.width}x${screen.height}@${devicePixelRatio}`, refresh_hz:hz, app_version:APP_VERSION});
+    if (res.error === 'already_participated') { $('#srv').textContent=''; return err('Our records show this email has already completed the task. Thank you — you do not need to do it again.'); }
+    if (!res.ok) { $('#go').disabled = false; $('#srv').textContent=''; return err('Could not start a session (' + res.error + '). Please try again in a moment.'); }
+    P = {participant_id:res.participant_id, session_id:res.session_id, age, gender:v('gender'), course,
+         validity_pct:+res.validity_pct, mapping:res.mapping, run_mode:RUN_MODE};
     renderInstructions();
   };
-  $('#rep').onclick = () => { location.href = 'report.html'; };
-  $('#dl-all').onclick = () => {
-    let all = []; try { all = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) {}
-    if (!all.length) return $('#err').textContent = 'No saved sessions on this computer yet.';
-    download(toCSV(all), 'HRR_all_participants.csv');
-  };
+  if (ADMIN) {
+    $('#rep').onclick = () => { location.href = 'report.html'; };
+    $('#dl-all').onclick = () => { const all = ls.get(BACKUP, []); if (!all.length) return $('#err').textContent = 'No sessions saved in this browser.'; download(toCSV(all), 'HRR_browser_backup.csv'); };
+  }
 }
 
 function renderInstructions() {
@@ -156,20 +238,18 @@ function renderInstructions() {
     <p>Press <kbd>F</kbd> if the square is on the <b>left</b> and <kbd>J</kbd> if it is on the <b>right</b>. Respond as <b>fast</b> and as <b>accurately</b> as you can.</p>
     <p>The shape may give you a clue about where the square will appear. Use it if you find it helpful.</p>
     <p>Now and then the task pauses and asks where you expect the square to appear after a shape. Answer with <kbd>F</kbd> or <kbd>J</kbd>, then rate how sure you are from <kbd>1</kbd> (guessing) to <kbd>4</kbd> (certain).</p>
-    <div class="notice">
-      <b>Task Structure:</b>
-      <ul>
-        <li>First: <b>${CFG.practice} practice trials</b> with instant feedback ("Correct" / "Wrong key").</li>
-        <li>Then: <b>3 short blocks of trials</b> with a rest pause between each block.</li>
-        <li><b>Completion:</b> Please complete all 3 blocks until you see the <b>"Thank you"</b> screen to ensure your session is recorded!</li>
-      </ul>
-    </div>
-    <button id="start">Start practice</button>`;
-  $('#start').onclick = runAll;
+    <div class="notice"><b>Structure:</b> ${CFG.practice} practice trials with feedback, then 3 blocks with a short rest between blocks. Keep going until you see <b>"Thank you"</b>.</div>
+    <p><b>Rest your left index finger on <kbd>F</kbd> and your right index finger on <kbd>J</kbd>. Press <kbd>F</kbd> and then <kbd>J</kbd> to start the practice.</b></p>
+    <p class="mute" id="kc">Waiting for F…</p>`;
+  (async () => {
+    await waitKey(['f']); $('#kc').textContent = 'F ✓  — now press J'; await waitKey(['j']);
+    runAll();
+  })();
 }
 
 /* ---------- trial ---------- */
 async function trial(cue, side, feedback) {
+  hiddenFlag = false;
   show(FIX); await sleep(CFG.fixMs);
   show(cueHTML(cue)); await frame(); const tCue = performance.now(); await sleep(CFG.cueMs);
   show(FIX); await sleep(CFG.isiMs);
@@ -178,10 +258,10 @@ async function trial(cue, side, feedback) {
   const r = await waitKey(['f','j'], CFG.maxRT);
   const resp = r ? (r.key==='f' ? 'left' : 'right') : '';
   const correct = resp === side;
-  if (feedback) { show(`<div class="msg">${!r ? 'Too slow' : correct ? 'Correct' : 'Wrong key'}</div>`); await sleep(600); }
+  if (feedback) { show(`<div class="msg">${!r ? 'Too slow' : correct ? 'Correct' : 'Wrong key'}</div>`); await sleep(FAST ? 20 : 600); }
   show(FIX); await sleep(CFG.itiMin + Math.random()*(CFG.itiMax-CFG.itiMin));
   return {response:resp, correct:correct?1:0, RT: r ? Math.round(r.rt) : '', timeout: r ? 0 : 1,
-          anticipation: r && r.rt<150 ? 1 : 0, soa_actual_ms: Math.round(tTgt - tCue)};
+          anticipation: r && r.rt<150 ? 1 : 0, soa_actual_ms: Math.round(tTgt - tCue), hidden_during_trial: hiddenFlag ? 1 : 0};
 }
 
 async function probe(cue, ph, trialNo) {
@@ -190,63 +270,95 @@ async function probe(cue, ph, trialNo) {
   const side = a.key==='f' ? 'left' : 'right';
   show(`<div class="msg">How sure are you?</div><div class="sub"><kbd>1</kbd> guessing &nbsp; <kbd>2</kbd> unsure &nbsp; <kbd>3</kbd> fairly sure &nbsp; <kbd>4</kbd> certain</div>`);
   const c = await waitKey(['1','2','3','4']);
-  show(FIX); await sleep(500);
+  show(FIX); await sleep(FAST ? 20 : 500);
   return {row_type:'probe', trial:trialNo, phase:ph, phase_name:PHASE_NAMES[ph], cue,
           probe_expected_side:side, rule_side:ruleSide(cue,ph), explicit_matches_rule: side===ruleSide(cue,ph) ? 1 : 0,
           probe_confidence:+c.key, RT_probe_ms:Math.round(a.rt)};
 }
 
 const onBeforeUnload = e => { e.preventDefault(); e.returnValue = ''; };
+const base = () => ({session_id:P.session_id, participant_id:P.participant_id, run_mode:P.run_mode, age:P.age, gender:P.gender,
+                     course:P.course, validity_pct:P.validity_pct, mapping:P.mapping});
+function addRow(r) { rowIdx++; const row = {row_key:`${P.session_id}:${rowIdx}`, ...base(), ...r, timestamp:new Date().toISOString()}; rows.push(row); return row; }
+
+/* Send a block's rows in the background; if the server does not confirm, they stay queued in this browser. */
+let lastSend = Promise.resolve();
+function sendBlock(blockRows) {
+  queue(P.session_id, blockRows);
+  lastSend = lastSend.then(() => flush(P.session_id));
+  return lastSend;
+}
 
 async function runAll() {
-  rows = [];
+  if (STARTED) return;            // the task can run only once per page load
+  STARTED = true;
+  if (document.activeElement) document.activeElement.blur();
   window.addEventListener('beforeunload', onBeforeUnload);
+  try { if (!FAST) await document.documentElement.requestFullscreen?.(); } catch (e) {}
+  hiddenCount = 0;
+
+  /* Practice: random side, not saved. Must get >= 4 of 6 correct to continue (max 3 rounds), so people who
+     have not understood they must press on EVERY square are caught before the real data starts. */
   show(`<div class="msg">Practice<div class="sub">Press <kbd>Space</kbd> to begin</div></div>`); await waitKey([' ']);
-  for (let i=0;i<CFG.practice;i++) {            // practice: no cue-target relationship (random side)
-    await trial(i%2 ? 'blue' : 'orange', Math.random()<.5 ? 'left' : 'right', true);
+  P.practice_rounds = 0;
+  while (true) {
+    P.practice_rounds++; let ok = 0;
+    for (let i=0;i<CFG.practice;i++) ok += (await trial(i%2 ? 'blue' : 'orange', Math.random()<.5 ? 'left' : 'right', true)).correct;
+    P.practice_correct = ok;
+    if (ok >= 4 || P.practice_rounds >= 3) break;
+    show(`<div class="msg">You got ${ok} of ${CFG.practice} correct.<br><br>Press <kbd>F</kbd> for a square on the left and <kbd>J</kbd> for a square on the right, <b>every time</b> a square appears, within about one second.<div class="sub">Press <kbd>Space</kbd> to try the practice again</div></div>`);
+    await waitKey([' ']);
   }
   show(`<div class="msg">Practice complete.<div class="sub">Press <kbd>Space</kbd> to start Block 1 of 3</div></div>`); await waitKey([' ']);
 
   const v = P.validity_pct/100;
-  let n = 0;
+  let n = 0, probeCount = 0, streak = 0;
   for (let p=0;p<3;p++) {
     if (p > 0) {
       show(`<div class="msg">Block ${p} of 3 complete.<br><br>Take a short rest if needed.<div class="sub">Press <kbd>Space</kbd> to start Block ${p+1} of 3</div></div>`);
       await waitKey([' ']);
     }
-    const list = buildPhase(p+1, CFG.phases[p], v);
+    const list = buildPhase(p+1, CFG.phases[p], v), blockStart = rows.length;
     for (let i=0;i<list.length;i++) {
       const t = list[i]; n++;
       const rs = ruleSide(t.cue, t.phase);
       const side = t.valid ? rs : opp(rs);
       const res = await trial(t.cue, side, false);
-      rows.push({row_type:'trial', participant_id:P.participant_id, age:P.age, gender:P.gender, course:P.course, email:P.email,
-                 run_mode:P.run_mode, validity_pct:P.validity_pct, mapping:P.mapping,
-                 trial:n, phase:t.phase, phase_name:PHASE_NAMES[t.phase], trial_in_phase:i+1,
-                 cue:t.cue, rule_side:rs, target_side:side, validity:t.valid?'valid':'invalid', ...res,
-                 timestamp:new Date().toISOString()});
-      if (n % CFG.probeEvery === 0) {
-        const pr = await probe(Math.random()<.5 ? 'blue' : 'orange', t.phase, n);
-        rows.push({participant_id:P.participant_id, age:P.age, gender:P.gender, course:P.course, email:P.email,
-                   run_mode:P.run_mode, validity_pct:P.validity_pct, mapping:P.mapping, ...pr, timestamp:new Date().toISOString()});
+      streak = res.timeout ? streak + 1 : 0;
+      if (streak >= 5) {          // participant has stopped responding: remind once per streak
+        P.timeout_warnings = (P.timeout_warnings || 0) + 1; streak = 0;
+        show(`<div class="msg">You have not responded to the last few squares.<br><br>Press <kbd>F</kbd> (left) or <kbd>J</kbd> (right) as soon as each square appears.<div class="sub">Press <kbd>Space</kbd> to continue</div></div>`);
+        await waitKey([' ']);
       }
+      addRow({row_type:'trial', trial:n, phase:t.phase, phase_name:PHASE_NAMES[t.phase], trial_in_phase:i+1,
+              cue:t.cue, rule_side:rs, target_side:side, validity:t.valid?'valid':'invalid', ...res});
+      if (n % CFG.probeEvery === 0) addRow(await probe(probeCount++ % 2 ? 'orange' : 'blue', t.phase, n));
     }
+    sendBlock(rows.slice(blockStart));
   }
   show(`<div class="msg">Last question.<br><br>Did you notice that what a shape meant changed at some point?<div class="sub"><kbd>Y</kbd> yes &nbsp; <kbd>N</kbd> no</div></div>`);
   const q = await waitKey(['y','n']);
-  rows.forEach(r => r.noticed_change = q.key==='y' ? 1 : 0);
-  try { const all = JSON.parse(localStorage.getItem(STORE) || '[]'); localStorage.setItem(STORE, JSON.stringify(all.concat(rows))); } catch(e) {}
-  show('<div class="msg">Saving your data…</div>');
-  P.sync = await sendToSheet(rows);
-  window.removeEventListener('beforeunload', onBeforeUnload);
+  P.noticed_change = q.key==='y' ? 1 : 0;
+  rows.forEach(r => r.noticed_change = P.noticed_change);
+  const all = ls.get(BACKUP, []); ls.set(BACKUP, all.concat(rows));          // local backup of every session
+
+  show('<div class="msg">Saving your data… please wait, do not close this page.</div>');
+  await lastSend;
+  queue(P.session_id, rows, {action:'complete', session_id:P.session_id, noticed_change:P.noticed_change, tab_hidden_count:hiddenCount,
+         practice_rounds:P.practice_rounds, practice_correct:P.practice_correct, timeout_warnings:P.timeout_warnings || 0});
+  const res = await flush(P.session_id);
+  P.saved = !!(res.ok && res.complete);
+  P.saveInfo = res;
+  if (P.saved) window.removeEventListener('beforeunload', onBeforeUnload);
+  try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) {}
   renderEnd();
 }
 
 /* ---------- results & export ---------- */
 function toCSV(data) {
   const cols = []; data.forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
-  const esc = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
-  return [cols.join(','), ...data.map(r => cols.map(c => esc(r[c])).join(','))].join('\n');
+  const q = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+  return [cols.join(','), ...data.map(r => cols.map(c => q(r[c])).join(','))].join('\n');
 }
 function download(text, name) {
   const a = document.createElement('a');
@@ -264,22 +376,25 @@ function renderEnd() {
     const inv = mean(ok.filter(r=>r.validity==='invalid').map(r=>r.RT));
     return `<tr><td>${PHASE_NAMES[ph]}</td><td>${fmt(val)}</td><td>${fmt(inv)}</td><td>${fmt(inv-val)}</td><td>${fmt(mean(t.map(r=>r.correct))*100)}%</td><td>${fmt(mean(Pb.filter(r=>r.phase===ph).map(r=>r.explicit_matches_rule))*100)}%</td></tr>`;
   }).join('');
-  const soa = mean(T.map(r=>r.soa_actual_ms));
+  const code = `P${String(P.participant_id).padStart(2,'0')}`;
   scr.innerHTML = `
     <h1>Thank you</h1>
-    <p class="mute">${P.sync==='sent' ? 'Your data was sent to the research sheet. Thank you!' : 'We could not confirm that your data was sent (' + P.sync + '). Please download the CSV below and send it to the researcher.'}</p>
-    <p><b>Debrief:</b> the shapes predicted the target side most of the time. Halfway through, the meaning of the shapes was reversed without warning. The task measures how quickly you noticed and adjusted.</p>
+    ${P.saved
+      ? `<p class="ok"><b>✓ Your data is saved</b> (participant ${code}). You can close this page.</p>`
+      : `<div class="banner"><b>Your data has not been confirmed as saved yet</b> (${esc(P.saveInfo.error || 'incomplete: ' + P.saveInfo.trials_saved + '/160 trials')}).
+         Please click <b>Retry saving</b>. If it still fails, click <b>Download CSV</b> and send the file to the researcher. Do not close this page first.</div>
+         <button id="retry">Retry saving</button>`}
+    <p><b>Debrief:</b> the shapes predicted the target side most of the time. In the second block the meaning of the shapes was reversed without warning, and in the third block it switched back. The task measures how quickly you noticed and adjusted. Please don't tell future participants about the switch.</p>
     <table><thead><tr><th>Phase</th><th>Valid RT (ms)</th><th>Invalid RT (ms)</th><th>Cue effect (ms)</th><th>Accuracy</th><th>Rule known</th></tr></thead><tbody>${body}</tbody></table>
-    <button id="dl">Download this participant (CSV)</button>
-    <button class="alt" id="cp">Copy CSV</button>
-    <button class="alt" id="dla">Download all saved sessions</button>
-    <button class="alt" id="next">Next participant</button>
+    <button class="alt" id="dl">Download CSV</button>
+    ${ADMIN ? '<button class="alt" id="next">Next participant</button>' : ''}
     <div class="err" id="err"></div>`;
-  const tag = `P${String(P.participant_id).padStart(2,'0')}`;
-  $('#dl').onclick = () => download(toCSV(rows), `HRR_${tag}.csv`);
-  $('#cp').onclick = async () => { try { await navigator.clipboard.writeText(toCSV(rows)); $('#err').style.color='var(--accent)'; $('#err').textContent='Copied. Paste into a Sheet.'; } catch(e) { $('#err').textContent='Copy failed. Use Download instead.'; } };
-  $('#dla').onclick = () => { let all=[]; try { all = JSON.parse(localStorage.getItem(STORE)||'[]'); } catch(e) {} if (!all.length) return $('#err').textContent='No saved sessions yet.'; download(toCSV(all), 'HRR_all_participants.csv'); };
-  $('#next').onclick = renderForm;
+  $('#dl').onclick = () => download(toCSV(rows), `HRR_${code}_${P.session_id.slice(0,8)}.csv`);
+  if ($('#retry')) $('#retry').onclick = async () => {
+    $('#retry').disabled = true; $('#err').textContent = 'Retrying…';
+    queue(P.session_id, rows); const res = await flush(P.session_id); P.saved = !!(res.ok && res.complete); P.saveInfo = res; renderEnd();
+  };
+  if ($('#next')) $('#next').onclick = () => location.reload();     // fresh page = fresh state for the next person
 }
 
 renderForm();

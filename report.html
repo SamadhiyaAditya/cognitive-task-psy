@@ -20,7 +20,7 @@ button.alt{background:#fff;color:#1d2127;border:1px solid #bbb}
 <body>
 <main>
 <h1>Hidden Rule Reversal task: results report</h1>
-<p class="mute">Generated from the live Google Sheet. Cue effect = mean RT on invalid trials minus mean RT on valid trials (correct, non-anticipatory responses only).</p>
+<p class="mute">Generated from the live Google Sheet (completed sessions only). Cue effect = mean RT on invalid trials minus mean RT on valid trials (correct, non-anticipatory responses only).</p>
 <div class="noprint"><button id="refresh">Refresh data</button><button class="alt" id="print">Print / save as PDF</button><button class="alt" id="csv">Download participant summary (CSV)</button><button class="alt" id="back">Back to task</button></div>
 <div id="out"></div>
 </main>
@@ -50,11 +50,7 @@ function anova(gs){const all=gs.flat(),N=all.length,k=gs.length,gm=mean(all);let
 /* ---- one summary row per participant ---- */
 function summarise(rows){
   const by = {};
-  rows.forEach(r => {
-    const em = (r.email || '').toString().trim().toLowerCase();
-    const key = em ? `${r.participant_id}_${em}` : String(r.participant_id);
-    (by[key] = by[key] || []).push(r);
-  });
+  rows.forEach(r => { const key = r.session_id || `${r.participant_id}_${r.email||''}`; (by[key] = by[key] || []).push(r); });
   return Object.values(by).map(rs => {
     const T = rs.filter(r=>r.row_type==='trial'), Pb = rs.filter(r=>r.row_type==='probe'), h = rs[0];
     const ok = T.filter(r=>+r.correct===1 && +r.anticipation===0 && +r.timeout===0 && r.RT!=='');
@@ -62,7 +58,7 @@ function summarise(rows){
       const v = s.filter(r=>r.validity==='valid').map(r=>+r.RT), i = s.filter(r=>r.validity==='invalid').map(r=>+r.RT);
       return v.length && i.length ? mean(i)-mean(v) : NaN; };
     const ex = ph => { const s = Pb.filter(r=>+r.phase===ph); return s.length ? mean(s.map(r=>+r.explicit_matches_rule))*100 : NaN; };
-    const o = {id:h.participant_id, email:String(h.email||''), age:+h.age, gender:String(h.gender), course:String(h.course), group:+h.validity_pct, noticed:+h.noticed_change,
+    const o = {id:h.participant_id, session:h.session_id, age:+h.age, gender:String(h.gender), course:String(h.course), group:+h.validity_pct, noticed:+h.noticed_change,
       P1:eff(1,1,999), P2a:eff(2,1,30), P2b:eff(2,31,999), P3:eff(3,1,999),
       acc:mean(T.map(r=>+r.correct))*100, rt:mean(ok.map(r=>+r.RT)), exp1:ex(1), exp2:ex(2)};
     o.cost = o.P1 - o.P2a; o.recov = o.P2b - o.P2a; return o;
@@ -158,7 +154,15 @@ async function load(){
   const out = $('#out');
   if(!SCRIPT_URL.startsWith('https://')){ out.innerHTML = '<p class="err">Set SCRIPT_URL at the top of report.html to your Apps Script web app URL.</p>'; return; }
   out.innerHTML = '<p class="mute">Loading data…</p>';
-  try { const r = await fetch(SCRIPT_URL); const rows = await r.json(); build(rows.filter(x => x.run_mode !== 'dry')); }
+  try {
+    const r = await fetch(SCRIPT_URL); const d = await r.json();
+    // server returns only sessions marked complete (all 160 trials + 8 probes saved); one entry per session
+    const pm = {}; d.participants.forEach(p => pm[p.session_id] = p);
+    const seen = new Set();
+    const rows = d.trials.filter(t => !seen.has(t.row_key) && seen.add(t.row_key))
+      .map(t => ({...t, noticed_change: pm[t.session_id].noticed_change}));
+    build(rows);
+  }
   catch(e){ out.innerHTML = '<p class="err">Could not load data from the sheet. Check that the script is deployed with access set to Anyone, and that the URL is correct.</p>'; }
 }
 $('#refresh').onclick = load;
