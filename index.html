@@ -50,7 +50,6 @@ th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}
    Prediction probes (where do you expect the target? + confidence) every `probeEvery` trials. */
 
 const REAL = {fixMs:500, cueMs:500, isiMs:200, maxRT:1500, itiMin:600, itiMax:1000, phases:[60,60,40], probeEvery:20, practice:6};
-const DRY  = {...REAL, phases:[8,8,8], probeEvery:8, practice:2};
 const PHASE_NAMES = {1:'Acquisition', 2:'Reversal', 3:'Re-reversal'};
 const STORE = 'hrr_all_rows';
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxAwo1rpr-RjyWtqttd-JJL060Q6e9EMxczmLpb1SpBmqtyMvhv7_NCYszYlsCFD2_dtw/exec';
@@ -111,7 +110,6 @@ function renderForm() {
     <label for="course">Course</label><input id="course" type="text" placeholder="e.g. BA Psychology">
     <label for="email">Email</label><input id="email" type="email" placeholder="name@example.com">
     <label class="check"><input id="consent" type="checkbox"><span>I agree to take part. My email is only used by the research team to contact me. Analysis uses my participant number instead.</span></label>
-    <label class="check"><input id="dry" type="checkbox"><span>Dry run (shortened to ${DRY.phases.reduce((a,b)=>a+b)} trials, not saved). Use this to test the task.</span></label>
     <div class="err" id="err"></div>
     <button id="go">Continue</button>
     <button class="alt" id="rep">Make report</button>
@@ -125,10 +123,10 @@ function renderForm() {
     if (!v('course')) return err('Enter your course.');
     if (!/^\S+@\S+\.\S+$/.test(v('email'))) return err('Enter a valid email address.');
     if (!$('#consent').checked) return err('Tick the consent box to continue.');
-    CFG = $('#dry').checked ? DRY : REAL;
+    CFG = REAL;
     const n = +v('pid');
     P = {participant_id:n, age:+v('age'), gender:v('gender'), course:v('course'), email:v('email'),
-         run_mode: CFG===DRY ? 'dry' : 'real',
+         run_mode: 'real',
          validity_pct: n%2===1 ? 85 : 70,
          mapping: Math.floor((n-1)/2)%2===0 ? 'A' : 'B'};
     renderInstructions();
@@ -213,11 +211,9 @@ async function runAll() {
   show(`<div class="msg">Last question.<br><br>Did you notice that what a shape meant changed at some point?<div class="sub"><kbd>Y</kbd> yes &nbsp; <kbd>N</kbd> no</div></div>`);
   const q = await waitKey(['y','n']);
   rows.forEach(r => r.noticed_change = q.key==='y' ? 1 : 0);
-  if (P.run_mode === 'real') {
-    try { const all = JSON.parse(localStorage.getItem(STORE) || '[]'); localStorage.setItem(STORE, JSON.stringify(all.concat(rows))); } catch(e) {}
-  }
+  try { const all = JSON.parse(localStorage.getItem(STORE) || '[]'); localStorage.setItem(STORE, JSON.stringify(all.concat(rows))); } catch(e) {}
   show('<div class="msg">Saving your data…</div>');
-  P.sync = P.run_mode === 'real' ? await sendToSheet(rows) : 'dry run, not sent';
+  P.sync = await sendToSheet(rows);
   renderEnd();
 }
 
@@ -245,8 +241,8 @@ function renderEnd() {
   }).join('');
   const soa = mean(T.map(r=>r.soa_actual_ms));
   scr.innerHTML = `
-    <h1>${P.run_mode==='dry' ? 'Dry run complete' : 'Thank you'}</h1>
-    <p class="mute">${P.run_mode==='dry' ? 'Check that the average cue-to-target time is close to 700 ms (now ' + fmt(soa) + ' ms). This data is not saved.' : (P.sync==='sent' ? 'Your data was sent to the research sheet. Thank you!' : 'We could not confirm that your data was sent (' + P.sync + '). Please download the CSV below and send it to the researcher.')}</p>
+    <h1>Thank you</h1>
+    <p class="mute">${P.sync==='sent' ? 'Your data was sent to the research sheet. Thank you!' : 'We could not confirm that your data was sent (' + P.sync + '). Please download the CSV below and send it to the researcher.'}</p>
     <p><b>Debrief:</b> the shapes predicted the target side most of the time. Halfway through, the meaning of the shapes was reversed without warning. The task measures how quickly you noticed and adjusted.</p>
     <table><thead><tr><th>Phase</th><th>Valid RT (ms)</th><th>Invalid RT (ms)</th><th>Cue effect (ms)</th><th>Accuracy</th><th>Rule known</th></tr></thead><tbody>${body}</tbody></table>
     <button id="dl">Download this participant (CSV)</button>
@@ -254,7 +250,7 @@ function renderEnd() {
     <button class="alt" id="dla">Download all saved sessions</button>
     <button class="alt" id="next">Next participant</button>
     <div class="err" id="err"></div>`;
-  const tag = `${P.run_mode==='dry'?'DRY_':''}P${String(P.participant_id).padStart(2,'0')}`;
+  const tag = `P${String(P.participant_id).padStart(2,'0')}`;
   $('#dl').onclick = () => download(toCSV(rows), `HRR_${tag}.csv`);
   $('#cp').onclick = async () => { try { await navigator.clipboard.writeText(toCSV(rows)); $('#err').style.color='var(--accent)'; $('#err').textContent='Copied. Paste into a Sheet.'; } catch(e) { $('#err').textContent='Copy failed. Use Download instead.'; } };
   $('#dla').onclick = () => { let all=[]; try { all = JSON.parse(localStorage.getItem(STORE)||'[]'); } catch(e) {} if (!all.length) return $('#err').textContent='No saved sessions yet.'; download(toCSV(all), 'HRR_all_participants.csv'); };
