@@ -49,7 +49,12 @@ function anova(gs){const all=gs.flat(),N=all.length,k=gs.length,gm=mean(all);let
 
 /* ---- one summary row per participant ---- */
 function summarise(rows){
-  const by = {}; rows.forEach(r => (by[r.participant_id] = by[r.participant_id] || []).push(r));
+  const by = {};
+  rows.forEach(r => {
+    const em = (r.email || '').toString().trim().toLowerCase();
+    const key = em ? `${r.participant_id}_${em}` : String(r.participant_id);
+    (by[key] = by[key] || []).push(r);
+  });
   return Object.values(by).map(rs => {
     const T = rs.filter(r=>r.row_type==='trial'), Pb = rs.filter(r=>r.row_type==='probe'), h = rs[0];
     const ok = T.filter(r=>+r.correct===1 && +r.anticipation===0 && +r.timeout===0 && r.RT!=='');
@@ -57,7 +62,7 @@ function summarise(rows){
       const v = s.filter(r=>r.validity==='valid').map(r=>+r.RT), i = s.filter(r=>r.validity==='invalid').map(r=>+r.RT);
       return v.length && i.length ? mean(i)-mean(v) : NaN; };
     const ex = ph => { const s = Pb.filter(r=>+r.phase===ph); return s.length ? mean(s.map(r=>+r.explicit_matches_rule))*100 : NaN; };
-    const o = {id:h.participant_id, age:+h.age, gender:String(h.gender), course:String(h.course), group:+h.validity_pct, noticed:+h.noticed_change,
+    const o = {id:h.participant_id, email:String(h.email||''), age:+h.age, gender:String(h.gender), course:String(h.course), group:+h.validity_pct, noticed:+h.noticed_change,
       P1:eff(1,1,999), P2a:eff(2,1,30), P2b:eff(2,31,999), P3:eff(3,1,999),
       acc:mean(T.map(r=>+r.correct))*100, rt:mean(ok.map(r=>+r.RT)), exp1:ex(1), exp2:ex(2)};
     o.cost = o.P1 - o.P2a; o.recov = o.P2b - o.P2a; return o;
