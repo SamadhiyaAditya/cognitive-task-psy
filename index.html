@@ -34,6 +34,9 @@ th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}
 .slot{width:110px;height:110px;display:flex;align-items:center;justify-content:center}
 .tgt{display:block;width:64px;height:64px;background:#fff;border-radius:4px}
 .small{font:300 48px/1 system-ui,sans-serif}
+.notice{background:var(--panel);border-left:4px solid var(--accent);padding:1rem 1.1rem;margin:1.2rem 0;border-radius:0 6px 6px 0;font-size:.95rem;line-height:1.6}
+.notice ul{margin:.4rem 0 0;padding-left:1.2rem}
+.notice li{margin:.3rem 0}
 </style>
 </head>
 <body>
@@ -101,7 +104,14 @@ function renderForm() {
   hideStage();
   scr.innerHTML = `
     <h1>Hidden Rule Reversal task</h1>
-    <p class="mute">A short reaction and prediction task. It takes about 10 minutes. Use a laptop or desktop with a physical keyboard.</p>
+    <div class="notice">
+      <b>Important Participation Guidelines:</b>
+      <ul>
+        <li>⏱️ <b>Duration:</b> Takes about <b>8–10 minutes</b> to complete.</li>
+        <li>⌨️ <b>Physical keyboard required:</b> You will use keys <kbd>F</kbd> and <kbd>J</kbd> (left and right index fingers).</li>
+        <li>🚫 <b>Please do not close or refresh this tab:</b> Responses are recorded during the task, but your data is submitted to the research sheet <b>only at the very end</b> when you reach the "Thank you" screen.</li>
+      </ul>
+    </div>
     <h2>Participant details</h2>
     <label for="pid">Participant number</label><input id="pid" type="number" min="1" placeholder="1, 2, 3 …">
     <label for="age">Age</label><input id="age" type="number" min="16" max="80">
@@ -143,10 +153,17 @@ function renderInstructions() {
   scr.innerHTML = `
     <h1>How the task works</h1>
     <p>A <b>shape</b> appears in the centre of the screen: a blue circle or an orange diamond. A moment later a white square appears on the <b>left</b> or the <b>right</b>.</p>
-    <p>Press <kbd>F</kbd> if the square is on the left and <kbd>J</kbd> if it is on the right. Respond as <b>fast</b> and as <b>accurately</b> as you can.</p>
-    <p>The shape may give you a hint about where the square will appear. Use it if you find it helpful.</p>
-    <p>Now and then the task stops and asks where you expect the square to appear after a shape. Answer with <kbd>F</kbd> or <kbd>J</kbd>, then rate how sure you are from <kbd>1</kbd> (guessing) to <kbd>4</kbd> (certain).</p>
-    <p class="mute">First there are ${CFG.practice} practice trials with feedback.</p>
+    <p>Press <kbd>F</kbd> if the square is on the <b>left</b> and <kbd>J</kbd> if it is on the <b>right</b>. Respond as <b>fast</b> and as <b>accurately</b> as you can.</p>
+    <p>The shape may give you a clue about where the square will appear. Use it if you find it helpful.</p>
+    <p>Now and then the task pauses and asks where you expect the square to appear after a shape. Answer with <kbd>F</kbd> or <kbd>J</kbd>, then rate how sure you are from <kbd>1</kbd> (guessing) to <kbd>4</kbd> (certain).</p>
+    <div class="notice">
+      <b>Task Structure:</b>
+      <ul>
+        <li>First: <b>${CFG.practice} practice trials</b> with instant feedback ("Correct" / "Wrong key").</li>
+        <li>Then: <b>3 short blocks of trials</b> with a rest pause between each block.</li>
+        <li><b>Completion:</b> Please complete all 3 blocks until you see the <b>"Thank you"</b> screen to ensure your session is recorded!</li>
+      </ul>
+    </div>
     <button id="start">Start practice</button>`;
   $('#start').onclick = runAll;
 }
@@ -179,17 +196,24 @@ async function probe(cue, ph, trialNo) {
           probe_confidence:+c.key, RT_probe_ms:Math.round(a.rt)};
 }
 
+const onBeforeUnload = e => { e.preventDefault(); e.returnValue = ''; };
+
 async function runAll() {
   rows = [];
+  window.addEventListener('beforeunload', onBeforeUnload);
   show(`<div class="msg">Practice<div class="sub">Press <kbd>Space</kbd> to begin</div></div>`); await waitKey([' ']);
   for (let i=0;i<CFG.practice;i++) {            // practice: no cue-target relationship (random side)
     await trial(i%2 ? 'blue' : 'orange', Math.random()<.5 ? 'left' : 'right', true);
   }
-  show(`<div class="msg">Practice complete.<div class="sub">Press <kbd>Space</kbd> to start the task</div></div>`); await waitKey([' ']);
+  show(`<div class="msg">Practice complete.<div class="sub">Press <kbd>Space</kbd> to start Block 1 of 3</div></div>`); await waitKey([' ']);
 
   const v = P.validity_pct/100;
   let n = 0;
   for (let p=0;p<3;p++) {
+    if (p > 0) {
+      show(`<div class="msg">Block ${p} of 3 complete.<br><br>Take a short rest if needed.<div class="sub">Press <kbd>Space</kbd> to start Block ${p+1} of 3</div></div>`);
+      await waitKey([' ']);
+    }
     const list = buildPhase(p+1, CFG.phases[p], v);
     for (let i=0;i<list.length;i++) {
       const t = list[i]; n++;
@@ -214,6 +238,7 @@ async function runAll() {
   try { const all = JSON.parse(localStorage.getItem(STORE) || '[]'); localStorage.setItem(STORE, JSON.stringify(all.concat(rows))); } catch(e) {}
   show('<div class="msg">Saving your data…</div>');
   P.sync = await sendToSheet(rows);
+  window.removeEventListener('beforeunload', onBeforeUnload);
   renderEnd();
 }
 
